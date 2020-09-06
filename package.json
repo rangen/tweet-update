@@ -1,0 +1,28 @@
+{
+  "name": "tweet-update",
+  "version": "1.0.0",
+  "description": "worker to update AWS Postgres DB of politician tweet_ids",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/rangen/tweet-update.git"
+  },
+  "keywords": [
+    "twitter",
+    "congress",
+    "postgres",
+    "node",
+    "postgresql",
+    "postgres",
+    "aws"
+  ],
+  "author": "@rangen",
+  "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/rangen/tweet-update/issues"
+  },
+  "homepage": "https://github.com/rangen/tweet-update#readme"
+}
