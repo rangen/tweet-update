@@ -6,9 +6,12 @@ const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 360000
 
 // Global boolean to halt execution when 15-minute rate threshold crossed to avoid API key abuse
 let rate_limited_exceeded = false;
+//will set remaining in 15-minute window via initial dummy API call
+let window_rate;
 
 //helper function to decrement tweetIDs that exceed JS 32-bit int range
 function decrementString(str) {
+    if (!str) return '1'
     // If content (leading digit after max recursion) is 1, return empty to prevent leading 0s in specifically 10000..00
     if (str === '1') return ''
     
@@ -65,14 +68,25 @@ function groupByDistrict(accounts) {
                 checked: false
             })
     })
-    return grouped;
+   
+    return Object.values(grouped)
 }
 
 function fetchTweets(district) {
-    district.accounts.forEach(async (account)=> 
-        await retrieveNewTweets(account)
-    )
-    return district;
+    return new Promise(async resolve=>{
+        let promises = district.accounts.map(retrieveNewTweets)
+        await Promise.all(promises)
+            // .catch(()=>console.log("Rate limit exceeded"))
+
+
+        //set a flag in the district object if every twitter account was succesfully checked AND at least one of them had new tweets
+        //ONLY checking if any had new tweets could cause problems when our program exits during an API window limit
+        //better to wait until the next batch run to be safe
+        if (district.accounts.every(a=>a.checked || a.deleteMe) && district.accounts.some(a=>a.newTweets.length)) {
+            district.updateReady = true;
+        }
+        resolve();
+    })
 }
 
 async function retrieveNewTweets(account) {
@@ -80,49 +94,89 @@ async function retrieveNewTweets(account) {
     let sinceID = account.sinceID;
     let maxID;
     let tweetsAvailable = true;
+    let tweets = [];
 
     while (tweetsAvailable) {
-        const config = {
+        const params = {
             screen_name: account.handle,
             count: 200,
             trim_user: true,
-            since_id: sinceID
+            since_id: decrementString(sinceID)
+            //Intentionally decrement since_id string to 'overlap' with a tweet we already have saved in db to ensure data
+            //continuity without an extra API call for a []     be sure to not re-save this to db later
         }
+        //maxID is only sent to API on calls after the first, when more than one batch of tweets needs to be retrieved
+        if (maxID) {params.max_id = maxID}
+        
+        window_rate -= 1;
+        if (window_rate <= 1000) { rate_limited_exceeded = true;}
 
-        if (maxID) {config.max_id = maxID}
-    
-        // try {
-            console.log(`Attempting to fetch with since_id: ${sinceID} and max_id: ${maxID}`)
-            let tweets = await twitter.get('statuses/user_timeline', config)
-        // } catch (e) {
-        //     console.dir(e.errors)
-        // }
+        if (rate_limited_exceeded) {
+            console.log(`Rate Limit exceeded. Could not retrieve for ${account.handle}`)
+            return //Promise.reject('3423rasdfsf')//Anything more useful?  reject? 
+        }
+        console.log(`Attempting to fetch with since_id: ${params.since_id} and max_id: ${maxID} for ${account.handle}`)
+        try {
+            tweets = await twitter.get('statuses/user_timeline', params)
+        } catch(e) {
+            if (e.errors) {
+                console.log(`Error caught for ${account.handle}: ${e.errors[0].message}`)
+                if (e.errors[0].code === 34) account.deleteMe = true;
+            } else {
+                console.log(`Other Error: ${e}`)
+            }
+        }
         //Twitter API returns [] tweets if none available since since_id
+        //but we decremented above, so we should always get 1 tweet, unless they deleted that tweet, or their account
         //maxID is inclusive, so needs to be decremented to avoid overlap
-        if (tweets && tweets.length) {
-            let tweetInfo = tweets.map(a=>({tweetID: a.id_str, createdAt: a.created_at}))
-            account.newTweets.push(...tweetInfo)
-            maxID = decrementString(tweets[tweets.length - 1].id_str)
-            console.log(`Found ${tweetInfo.length} for ${account.handle}`)
-        } else {
-            console.log(`No More Tweets for ${account.handle}`)
-            account.newSinceID = sinceID;
-            account.newLastChecked = new Date();
+
+        if (tweets.length) {
+            let lastReturnedTweet = tweets.pop();
+            maxID = lastReturnedTweet.id_str
+            //if new tweets
+            if (tweets.length) {
+                let newTweetInfo = tweets.map(a=>({tweetID: a.id_str, createdAt: a.created_at}))
+                account.newTweets.push(...newTweetInfo)
+                account.newSinceID = account.newTweets[0].tweetID;
+                console.log(`Found ${newTweetInfo.length} new tweets for ${account.handle}`)
+            } else {
+                console.log(`No New Tweets found for ${account.handle}`)
+                tweetsAvailable = false;
+            }    
+                //if last tweetID returned from API matches sinceID from DB (from a previous session call), no more tweets to grab
+            if (maxID === sinceID) {
+                account.checked = true;
+                account.newLastChecked = new Date();
+                tweetsAvailable = false;
+            }
+        } else { 
             tweetsAvailable = false;
+            account.checked = true;
+            account.newlastChecked = new Date();
         }
     }
 }
 
-// getStaleDistrictTwitterAccounts()
-//     .then(accts=>groupByDistrict(accts))
-//     .then(grouped=>fetchTweets(grouped))
-//     .then(districts=>console.log(districts["2"]))
-//     .catch(e=>console.log(e))
-//     .finally(()=>knex.destroy());
+async function getRateLimit() {
+    let response = await twitter.get('statuses/user_timeline', {screen_name: 'realdonaldtrump', count: 1})
 
-getStaleDistrictTwitterAccounts()
-    .then(accounts=>groupByDistrict(accounts))
-    .then(districts=> {
-        Promise.all(Object.keys(districts).slice(-5).map(d=>fetchTweets(districts[d])))
-    })
-    .catch(e=>console.log(`Error: ${e}`))
+    window_rate = ~~response._headers.get('x-rate-limit-remaining')
+    console.log(`Calls remaining this window: ${window_rate}`)
+}
+
+(async () => {
+    let accounts = await getStaleDistrictTwitterAccounts();
+    let districts = groupByDistrict(accounts);
+    districts = districts.slice(49, 50)
+
+    await getRateLimit();
+
+    let promises = districts.map(fetchTweets)
+    await Promise.all(promises)
+
+
+    console.dir(districts)
+
+    knex.destroy()
+        .then(console.log("DB conn destroyed"))
+})();
