@@ -144,7 +144,7 @@ async function retrieveNewTweets(account) {
             let newTweetInfo = tweets.map(a=>({snowflake_id: a.id_str, created: a.created_at}))
             account.newTweets.push(...newTweetInfo)
 
-            total_tweets_grabbed += tweets.length;
+            total_tweets_grabbed += newTweetInfo.length;
             if (tweets.length < 180) tweetsAvailable = false;
         } else {
             console.log(`No New Tweets found for ${account.handle}`)
@@ -157,13 +157,13 @@ async function retrieveNewTweets(account) {
 }
 
 async function saveToDB(districts) {
-    const tweetRows = [], districtRows = [], accountRows = [];
+    const tweetRows = [], districtRows = [], accountRows = [], accountDeletes = [];
     for (let district of districts) {
         if (!district.updateReady) continue; // Skip if twitter update failed
 
         districtRows.push({id: district.district_id, tweets_last_updated: new Date()})
-        
         for (let account of district.accounts) {
+            if (account.deleteMe) accountDeletes.push(account.twitter_account_id)
             if (account.newSinceID && account.newLastChecked) { //Skip if Account invalid
                 accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count})
                 for (let tweet of account.newTweets) {
@@ -172,21 +172,30 @@ async function saveToDB(districts) {
             }    
         }
     }
-
+    let result = {};
     //INSERT into tweets
-    await knex.batchInsert('tweets', tweetRows)
+    result.insertTweets = await knex.batchInsert('tweets', tweetRows)
 
     //UPDATE accounts       TODO: add error handling
-    await knex.transaction(async trx => {
+    result.updateAccounts = await knex.transaction(async trx => {
         return Promise.all(accountRows.map(account=> knex('twitter_accounts').where('id', account.id).update(account).transacting(trx)))
     })
 
     //UPDATE districts
-    await knex.transaction(async trx=> {
+    result.updateDistricts = await knex.transaction(async trx=> {
         return Promise.all(districtRows.map(district=> knex('districts').where('id', district.id).update(district).transacting(trx)))
     })
 
-    return {tweets: tweetRows, accounts: accountRows, districts: districtRows}
+    if (accountDeletes.length) {
+        //DELETE deleted / privatized twitter_accounts & any associated tweets
+        result.deleteAccounts = await knex.transaction(async trx=> {
+            return Promise.all(accountDeletes.map(account=> knex('twitter_accounts').where('id', account).del().transacting(trx)))
+        })
+        result.deleteTweets = await knex.transaction(async trx=> {
+            return Promise.all(accountDeletes.map(account=> knex('tweets').where('twitter_account_id', account).del().transacting(trx)))
+        })
+    }
+    return result;
 }
 
 async function getRateLimit() {
@@ -202,7 +211,7 @@ async function getRateLimit() {
     console.time('twitter')
     let accounts = await getStaleDistrictTwitterAccounts();
     let districts = groupByDistrict(accounts);
-    districts = districts.slice(0, 25)
+    // districts = districts.slice(0, 25)
 
     await getRateLimit();
 
@@ -211,6 +220,7 @@ async function getRateLimit() {
 
     console.timeEnd('twitter')
     console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
+    console.log(`Calls remaining this window: ${window_rate}`)
     await saveToDB(districts);
 
 
