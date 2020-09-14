@@ -8,6 +8,7 @@ const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 360000
 let rate_limited_exceeded = false;
 //will set remaining in 15-minute window via initial dummy API call
 let window_rate;
+let total_tweets_grabbed = 0;
 
 //helper function to decrement tweetIDs that exceed JS 32-bit int range
 function decrementString(str) {
@@ -39,7 +40,7 @@ async function getStaleDistrictTwitterAccounts() {
         .orWhere('districts.tweets_last_updated', '<', new Date(new Date() - SINCE_LAST_CHECKED))
         .select(knex.ref('districts.id').as('district_id'))
         .select(knex.ref('twitter_accounts.id').as('account_id'))
-        .select('twitter_accounts.since_id', 'twitter_accounts.max_id', 'twitter_accounts.handle', 'twitter_accounts.last_checked', 'twitter_accounts.use')
+        .select('twitter_accounts.since_id', 'twitter_accounts.handle', 'twitter_accounts.last_checked', 'twitter_accounts.tweet_count')
         .select('states.abbreviation', 'districts.number', 'reps.candidate_name')
 }
 
@@ -53,6 +54,7 @@ function groupByDistrict(accounts) {
             grouped[a.district_id] = {
                 state:  a.abbreviation,
                 district:   a.number,
+                district_id: a.district_id,
                 updateReady: false,
                 accounts: []
                 }
@@ -62,8 +64,9 @@ function groupByDistrict(accounts) {
             {
                 handle: a.handle,
                 lastChecked: a.last_checked,
+                twitter_account_id: a.account_id,
+                tweet_count: a.tweet_count,
                 sinceID: a.since_id,
-                maxID: a.max_id,
                 newTweets: [],
                 checked: false
             })
@@ -91,7 +94,7 @@ function fetchTweets(district) {
 
 async function retrieveNewTweets(account) {
     //Used by Twitter for pagination
-    let sinceID = account.sinceID;
+    let oldestInDB = account.sinceID || '1';
     let maxID;
     let tweetsAvailable = true;
     let tweets = [];
@@ -101,15 +104,13 @@ async function retrieveNewTweets(account) {
             screen_name: account.handle,
             count: 200,
             trim_user: true,
-            since_id: decrementString(sinceID)
-            //Intentionally decrement since_id string to 'overlap' with a tweet we already have saved in db to ensure data
-            //continuity without an extra API call for a []     be sure to not re-save this to db later
+            since_id: oldestInDB
         }
         //maxID is only sent to API on calls after the first, when more than one batch of tweets needs to be retrieved
         if (maxID) {params.max_id = maxID}
         
         window_rate -= 1;
-        if (window_rate <= 1000) { rate_limited_exceeded = true;}
+        if (window_rate < 0) { rate_limited_exceeded = true;}
 
         if (rate_limited_exceeded) {
             console.log(`Rate Limit exceeded. Could not retrieve for ${account.handle}`)
@@ -119,63 +120,93 @@ async function retrieveNewTweets(account) {
         try {
             tweets = await twitter.get('statuses/user_timeline', params)
         } catch(e) {
-            if (e.errors) {
+            if (e.errors) {   // e.errors represents an error after a successful Twitter API call
                 console.log(`Error caught for ${account.handle}: ${e.errors[0].message}`)
                 if (e.errors[0].code === 34) account.deleteMe = true;
+                return //Promise.resolve?
             } else {
                 console.log(`Other Error: ${e}`)
+                account.checked = true;    //consider adding a retry after we ascertain which errors throws this clause
+                // will future calls succeed? should we log this?
+                return //Promise.resolve / reject? and switch main code to allSettled?
             }
         }
-        //Twitter API returns [] tweets if none available since since_id
-        //but we decremented above, so we should always get 1 tweet, unless they deleted that tweet, or their account
-        //maxID is inclusive, so needs to be decremented to avoid overlap
 
         if (tweets.length) {
-            let lastReturnedTweet = tweets.pop();
-            maxID = lastReturnedTweet.id_str
-            //if new tweets
-            if (tweets.length) {
-                let newTweetInfo = tweets.map(a=>({tweetID: a.id_str, createdAt: a.created_at}))
-                account.newTweets.push(...newTweetInfo)
-                account.newSinceID = account.newTweets[0].tweetID;
-                console.log(`Found ${newTweetInfo.length} new tweets for ${account.handle}`)
-            } else {
-                console.log(`No New Tweets found for ${account.handle}`)
-                tweetsAvailable = false;
-            }    
-                //if last tweetID returned from API matches sinceID from DB (from a previous session call), no more tweets to grab
-            if (maxID === sinceID) {
-                account.checked = true;
-                account.newLastChecked = new Date();
-                tweetsAvailable = false;
-            }
-        } else { 
+            maxID = tweets[tweets.length - 1].id_str    //save for a repeat loop now
+            if (!account.newSinceID) account.newSinceID = tweets[0].id_str; //set new sinceID for DB
+
+            let newTweetInfo = tweets.map(a=>({snowflake_id: a.id_str, created: a.created_at}))
+            account.newTweets.push(...newTweetInfo)
+            console.log(`Found ${newTweetInfo.length} new tweets for ${account.handle}`)
+            total_tweets_grabbed += tweets.length;
+            if (tweets.length < 180) tweetsAvailable = false;
+        } else {
+            console.log(`No New Tweets found for ${account.handle}`)
             tweetsAvailable = false;
-            account.checked = true;
-            account.newlastChecked = new Date();
+        }    
+    }
+    account.checked = true;
+    account.newLastChecked = new Date();
+    account.numNew = account.newTweets.length;
+}
+
+async function saveToDB(districts) {
+    const tweetRows = [], districtRows = [], accountRows = [];
+    for (let district of districts) {
+        if (!district.updateReady) continue; // Skip if twitter update failed
+
+        districtRows.push({id: district.district_id, tweets_last_updated: new Date()})
+        
+        for (let account of district.accounts) {
+            accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count})
+            for (let tweet of account.newTweets) {
+                tweetRows.push({twitter_account_id: account.twitter_account_id, ...tweet})
+            }    
         }
     }
+
+
+    //INSERT into tweets
+    await knex.batchInsert('tweets', tweetRows)
+
+    //UPDATE accounts       TODO: add error handling
+    await knex.transaction(async trx => {
+        return Promise.all(accountRows.map(account=> knex('twitter_accounts').where('id', account.id).update(account).transacting(trx)))
+    })
+
+    //UPDATE districts
+    await knex.transaction(async trx=> {
+        return Promise.all(districtRows.map(district=> knex('districts').where('id', district.id).update(district).transacting(trx)))
+    })
+
+    return {tweets: tweetRows, accounts: accountRows, districts: districtRows}
 }
 
 async function getRateLimit() {
     let response = await twitter.get('statuses/user_timeline', {screen_name: 'realdonaldtrump', count: 1})
 
     window_rate = ~~response._headers.get('x-rate-limit-remaining')
+    let reset_time = (new Date(response._headers.get('x-rate-limit-reset') * 1000)).toString();
     console.log(`Calls remaining this window: ${window_rate}`)
+    console.log(`Resets at: ${reset_time}`)
 }
 
 (async () => {
+    console.time('twitter')
     let accounts = await getStaleDistrictTwitterAccounts();
     let districts = groupByDistrict(accounts);
-    districts = districts.slice(49, 50)
+    districts = districts.slice(53, 54)
 
     await getRateLimit();
 
     let promises = districts.map(fetchTweets)
     await Promise.all(promises)
 
+    console.timeEnd('twitter')
+    console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
+    await saveToDB(districts);
 
-    console.dir(districts)
 
     knex.destroy()
         .then(console.log("DB conn destroyed"))
