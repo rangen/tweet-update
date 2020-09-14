@@ -56,6 +56,7 @@ function groupByDistrict(accounts) {
                 district:   a.number,
                 district_id: a.district_id,
                 updateReady: false,
+                updateJSON: false,
                 accounts: []
                 }
         }
@@ -66,7 +67,7 @@ function groupByDistrict(accounts) {
                 lastChecked: a.last_checked,
                 twitter_account_id: a.account_id,
                 tweet_count: a.tweet_count,
-                sinceID: a.since_id,
+                sinceID: a.since_id || '1',
                 newTweets: [],
                 checked: false
             })
@@ -85,8 +86,11 @@ function fetchTweets(district) {
         //set a flag in the district object if every twitter account was succesfully checked AND at least one of them had new tweets
         //ONLY checking if any had new tweets could cause problems when our program exits during an API window limit
         //better to wait until the next batch run to be safe
-        if (district.accounts.every(a=>a.checked || a.deleteMe) && district.accounts.some(a=>a.newTweets.length)) {
+        if (district.accounts.every(a=>a.checked || a.deleteMe)) {
             district.updateReady = true;
+            if (district.accounts.some(a=>a.newTweets.length)) {
+                district.updateJSON = true;
+            }
         }
         resolve();
     })
@@ -94,7 +98,7 @@ function fetchTweets(district) {
 
 async function retrieveNewTweets(account) {
     //Used by Twitter for pagination
-    let oldestInDB = account.sinceID || '1';
+    let oldestInDB = account.sinceID;
     let maxID;
     let tweetsAvailable = true;
     let tweets = [];
@@ -113,10 +117,9 @@ async function retrieveNewTweets(account) {
         if (window_rate < 0) { rate_limited_exceeded = true;}
 
         if (rate_limited_exceeded) {
-            console.log(`Rate Limit exceeded. Could not retrieve for ${account.handle}`)
             return //Promise.reject('3423rasdfsf')//Anything more useful?  reject? 
         }
-        console.log(`Attempting to fetch with since_id: ${params.since_id} and max_id: ${maxID} for ${account.handle}`)
+
         try {
             tweets = await twitter.get('statuses/user_timeline', params)
         } catch(e) {
@@ -125,7 +128,9 @@ async function retrieveNewTweets(account) {
                 if (e.errors[0].code === 34) account.deleteMe = true;
                 return //Promise.resolve?
             } else {
-                console.log(`Other Error: ${e}`)
+                let status = e._headers.get('status')
+                console.log(`Other Error: ${status}`)
+                if (status === '401 Unauthorized') account.deleteMe = true;
                 account.checked = true;    //consider adding a retry after we ascertain which errors throws this clause
                 // will future calls succeed? should we log this?
                 return //Promise.resolve / reject? and switch main code to allSettled?
@@ -138,7 +143,7 @@ async function retrieveNewTweets(account) {
 
             let newTweetInfo = tweets.map(a=>({snowflake_id: a.id_str, created: a.created_at}))
             account.newTweets.push(...newTweetInfo)
-            console.log(`Found ${newTweetInfo.length} new tweets for ${account.handle}`)
+
             total_tweets_grabbed += tweets.length;
             if (tweets.length < 180) tweetsAvailable = false;
         } else {
@@ -159,13 +164,14 @@ async function saveToDB(districts) {
         districtRows.push({id: district.district_id, tweets_last_updated: new Date()})
         
         for (let account of district.accounts) {
-            accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count})
-            for (let tweet of account.newTweets) {
-                tweetRows.push({twitter_account_id: account.twitter_account_id, ...tweet})
+            if (account.newSinceID && account.newLastChecked) { //Skip if Account invalid
+                accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count})
+                for (let tweet of account.newTweets) {
+                    tweetRows.push({twitter_account_id: account.twitter_account_id, ...tweet})
+                }
             }    
         }
     }
-
 
     //INSERT into tweets
     await knex.batchInsert('tweets', tweetRows)
@@ -196,7 +202,7 @@ async function getRateLimit() {
     console.time('twitter')
     let accounts = await getStaleDistrictTwitterAccounts();
     let districts = groupByDistrict(accounts);
-    districts = districts.slice(53, 54)
+    districts = districts.slice(0, 25)
 
     await getRateLimit();
 
@@ -209,5 +215,4 @@ async function getRateLimit() {
 
 
     knex.destroy()
-        .then(console.log("DB conn destroyed"))
 })();
