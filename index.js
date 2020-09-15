@@ -181,26 +181,34 @@ async function saveToDB(districts) {
     }
     let result = {};
     //INSERT into tweets
+    console.time('insertTweets')
     result.insertTweets = await knex.batchInsert('tweets', tweetRows)
-
+    console.timeEnd('insertTweets')
+    
     //UPDATE accounts       TODO: add error handling
+    console.time('updateAccounts')
     result.updateAccounts = await knex.transaction(async trx => {
         return Promise.all(accountRows.map(account=> knex('twitter_accounts').where('id', account.id).update(account).transacting(trx)))
     })
+    console.timeEnd('updateAccounts')
 
     //UPDATE districts
+    console.time('updateDistricts')
     result.updateDistricts = await knex.transaction(async trx=> {
         return Promise.all(districtRows.map(district=> knex('districts').where('id', district.id).update(district).transacting(trx)))
     })
+    console.timeEnd('updateDistricts')
 
     if (accountDeletes.length) {
         //DELETE deleted / privatized twitter_accounts & any associated tweets
+        console.time('deleteAccounts')
         result.deleteAccounts = await knex.transaction(async trx=> {
             return Promise.all(accountDeletes.map(account=> knex('twitter_accounts').where('id', account).del().transacting(trx)))
         })
         result.deleteTweets = await knex.transaction(async trx=> {
             return Promise.all(accountDeletes.map(account=> knex('tweets').where('twitter_account_id', account).del().transacting(trx)))
         })
+        console.timeEnd('deleteAccounts')
     }
     return result;
 }
@@ -243,27 +251,28 @@ async function buildJSONByDistrict(district_id) {
 
 (async () => {
     console.time('twitter')
-    // let accounts = await getStaleDistrictTwitterAccounts();
-    // console.log(accounts.length)
-    // let districts = groupByDistrict(accounts);
-    // // districts = districts.slice(0, 25)
+    let accounts = await getStaleDistrictTwitterAccounts();
+    console.log(accounts.length)
+    let districts = groupByDistrict(accounts);
+    // districts = districts.slice(0, 25)
 
-    // await getRateLimit();
+    await getRateLimit();
 
-    // let promises = districts.map(fetchTweets)
-    // await Promise.all(promises)
+    let promises = districts.map(fetchTweets)
+    await Promise.all(promises)
 
-    // console.timeEnd('twitter')
-    // console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
-    // console.log(`Calls remaining this window: ${window_rate}`)
-    // await saveToDB(districts);
-    
+    console.timeEnd('twitter')
+    console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
+    console.log(`Calls remaining this window: ${window_rate}`)
+    console.time('db push')
+    await saveToDB(districts);
+    console.timeEnd('db push')
     // for (let district of districts) {
     //     if (district.updateJSON) { //rebuild JSON file if new tweets were acquired
     //         let data = await buildJSONByDistrict(district.district_id)
     //     }
     // }
-    let json = await buildJSONByDistrict(1)
-    console.log(json)
+    // let json = await buildJSONByDistrict(1)
+    // console.log(json)
     knex.destroy()
 })();
