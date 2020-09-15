@@ -214,6 +214,33 @@ async function getRateLimit() {
     console.log(`Resets at: ${reset_time}`)
 }
 
+async function uploadToS3(JSONobject, filename) {
+    const params = {
+        Bucket: process.env.AWS_BUCKET,
+        Key: filePath,
+        Body:   JSON.stringify({msg: 'this works too'}),
+        ContentType:    "application/json",
+        ACL:'public-read'
+    }
+
+    await s3.putObject(params).promise()
+        .then(r=>console.log(r))
+        .catch(err=>console.log(err))
+}
+
+async function buildJSONByDistrict(district_id) {
+    return await knex('districts')
+        .join('reps', 'reps.district_id', '=', 'districts.id')
+        .join('twitter_accounts', 'twitter_accounts.politician_id', '=', 'reps.id')
+        .leftJoin('tweets', 'twitter_accounts.id', 'tweets.twitter_account_id')
+        .where('twitter_accounts.politician_type', 'Rep')
+        .where('districts.id', district_id)
+        .select(knex.ref('twitter_accounts.id').as('account_id'))
+        .select('twitter_accounts.tweet_count')
+        .select('tweets.snowflake_id', 'tweets.created')
+        .orderBy('tweets.created', 'desc')
+}
+
 (async () => {
     console.time('twitter')
     // let accounts = await getStaleDistrictTwitterAccounts();
@@ -230,20 +257,13 @@ async function getRateLimit() {
     // console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
     // console.log(`Calls remaining this window: ${window_rate}`)
     // await saveToDB(districts);
-
     
-    const bufferObject = new Buffer.from(JSON.stringify({test: "It worked (and we can read it!)!"}));
-    const filePath = 'test3.json'
-    const params = {
-        Bucket: process.env.AWS_BUCKET,
-        Key: filePath,
-        Body:   JSON.stringify({msg: 'this works too'}),
-        ContentType:    "application/json",
-        ACL:'public-read'
-    }
-
-    s3.putObject(params).promise()
-        .then(r=>console.log(r))
-        .catch(err=>console.log(err))
+    // for (let district of districts) {
+    //     if (district.updateJSON) { //rebuild JSON file if new tweets were acquired
+    //         let data = await buildJSONByDistrict(district.district_id)
+    //     }
+    // }
+    let json = await buildJSONByDistrict(1)
+    console.log(json)
     knex.destroy()
 })();
