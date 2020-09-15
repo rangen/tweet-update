@@ -1,8 +1,16 @@
 const knex = require('./db')
+
 const twitter = require('./twitter');
 
+const AWS = require('aws-sdk')
+const s3 = new AWS.S3();
+s3.config.update({
+    accessKeyId:    process.env.AWS_ID,
+    secretAccessKey:    process.env.AWS_SECRET
+});
+
 // Milliseconds for staleAccount query (twitterAccounts to be updated)
-const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 360000
+const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 3600000
 
 // Global boolean to halt execution when 15-minute rate threshold crossed to avoid API key abuse
 let rate_limited_exceeded = false;
@@ -113,7 +121,7 @@ async function retrieveNewTweets(account) {
         //maxID is only sent to API on calls after the first, when more than one batch of tweets needs to be retrieved
         if (maxID) {params.max_id = maxID}
         
-        window_rate -= 1;
+        window_rate--;
         if (window_rate < 0) { rate_limited_exceeded = true;}
 
         if (rate_limited_exceeded) {
@@ -129,7 +137,7 @@ async function retrieveNewTweets(account) {
                 return //Promise.resolve?
             } else {
                 let status = e._headers.get('status')
-                console.log(`Other Error: ${status}`)
+                console.log(`Other Error caught for ${account.handle}: ${status}`)
                 if (status === '401 Unauthorized') account.deleteMe = true;
                 account.checked = true;    //consider adding a retry after we ascertain which errors throws this clause
                 // will future calls succeed? should we log this?
@@ -147,7 +155,6 @@ async function retrieveNewTweets(account) {
             total_tweets_grabbed += newTweetInfo.length;
             if (tweets.length < 180) tweetsAvailable = false;
         } else {
-            console.log(`No New Tweets found for ${account.handle}`)
             tweetsAvailable = false;
         }    
     }
@@ -209,20 +216,34 @@ async function getRateLimit() {
 
 (async () => {
     console.time('twitter')
-    let accounts = await getStaleDistrictTwitterAccounts();
-    let districts = groupByDistrict(accounts);
-    // districts = districts.slice(0, 25)
+    // let accounts = await getStaleDistrictTwitterAccounts();
+    // console.log(accounts.length)
+    // let districts = groupByDistrict(accounts);
+    // // districts = districts.slice(0, 25)
 
-    await getRateLimit();
+    // await getRateLimit();
 
-    let promises = districts.map(fetchTweets)
-    await Promise.all(promises)
+    // let promises = districts.map(fetchTweets)
+    // await Promise.all(promises)
 
-    console.timeEnd('twitter')
-    console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
-    console.log(`Calls remaining this window: ${window_rate}`)
-    await saveToDB(districts);
+    // console.timeEnd('twitter')
+    // console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
+    // console.log(`Calls remaining this window: ${window_rate}`)
+    // await saveToDB(districts);
 
+    
+    const bufferObject = new Buffer.from(JSON.stringify({test: "It worked (and we can read it!)!"}));
+    const filePath = 'test3.json'
+    const params = {
+        Bucket: process.env.AWS_BUCKET,
+        Key: filePath,
+        Body:   JSON.stringify({msg: 'this works too'}),
+        ContentType:    "application/json",
+        ACL:'public-read'
+    }
 
+    s3.putObject(params).promise()
+        .then(r=>console.log(r))
+        .catch(err=>console.log(err))
     knex.destroy()
 })();

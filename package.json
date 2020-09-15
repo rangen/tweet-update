@@ -27,6 +27,7 @@
   },
   "homepage": "https://github.com/rangen/tweet-update#readme",
   "dependencies": {
+    "aws-sdk": "^2.752.0",
     "dotenv": "^8.2.0",
     "knex": "^0.21.5",
     "pg": "^8.3.3",
