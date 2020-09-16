@@ -2,6 +2,9 @@ const knex = require('./db')
 
 const twitter = require('./twitter');
 
+const twilio = require('twilio')
+let twilioClient = new twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
+
 const AWS = require('aws-sdk')
 const s3 = new AWS.S3();
 s3.config.update({
@@ -76,6 +79,7 @@ function groupByDistrict(accounts) {
                 twitter_account_id: a.account_id,
                 tweet_count: a.tweet_count,
                 sinceID: a.since_id || '1',
+                // newSinceID: a.since_id, //set to default for future batch Update operation; will be replaced if new tweet found
                 newTweets: [],
                 checked: false
             })
@@ -136,7 +140,7 @@ async function retrieveNewTweets(account) {
                 if (e.errors[0].code === 34) account.deleteMe = true;
                 return //Promise.resolve?
             } else {
-                let status = e._headers.get('status')
+                let status = e._headers && e._headers.get('status')
                 console.log(`Other Error caught for ${account.handle}: ${status}`)
                 if (status === '401 Unauthorized') account.deleteMe = true;
                 account.checked = true;    //consider adding a retry after we ascertain which errors throws this clause
@@ -156,6 +160,7 @@ async function retrieveNewTweets(account) {
             if (tweets.length < 180) tweetsAvailable = false;
         } else {
             tweetsAvailable = false;
+            if (!account.newSinceID) account.newSinceID = account.sinceID;
         }    
     }
     account.checked = true;
@@ -225,10 +230,11 @@ async function getRateLimit() {
 async function uploadToS3(JSONobject, filename) {
     const params = {
         Bucket: process.env.AWS_BUCKET,
-        Key: filePath,
-        Body:   JSON.stringify({msg: 'this works too'}),
+        Key: filename,
+        Body:   JSON.stringify(JSONobject),
         ContentType:    "application/json",
-        ACL:'public-read'
+        ACL:    'public-read',
+        CacheControl: `max-age=${3600 * process.env.HOURS_SINCE_LAST_CHECKED}`
     }
 
     await s3.putObject(params).promise()
@@ -237,24 +243,42 @@ async function uploadToS3(JSONobject, filename) {
 }
 
 async function buildJSONByDistrict(district_id) {
-    return await knex('districts')
-        .join('reps', 'reps.district_id', '=', 'districts.id')
-        .join('twitter_accounts', 'twitter_accounts.politician_id', '=', 'reps.id')
-        .leftJoin('tweets', 'twitter_accounts.id', 'tweets.twitter_account_id')
-        .where('twitter_accounts.politician_type', 'Rep')
-        .where('districts.id', district_id)
-        .select(knex.ref('twitter_accounts.id').as('account_id'))
-        .select('twitter_accounts.tweet_count')
-        .select('tweets.snowflake_id', 'tweets.created')
-        .orderBy('tweets.created', 'desc')
+    let district = {};
+    district.reps = await knex('reps')
+        .where('reps.district_id', district_id)
+        // .select('reps.candidate_loan_repayments', 'reps.candidate_name', 'reps.cash_on_hand_end', 'reps.cash_on_hand_start', 'reps.comm_refunds', 'reps.contrib_from_other_comms')
+        // .select('reps.contrib_from_party_comms', 'reps.contributions_from_candidate', 'reps.coverage_end_date', 'reps.debts')
+    let repIDs = district.reps.map(r=>r.id)
+    let twitterAccounts = await knex('twitter_accounts')
+        .where('politician_type', 'Rep')
+        .whereIn('politician_id', repIDs)
+    for (account of twitterAccounts) {
+        account.tweets = await knex('tweets')
+            .where('twitter_account_id', account.id)
+            .orderBy('created', 'desc')
+            .select('snowflake_id', 'created')
+        let belongsToThisRep = district.reps.find(r=>r.id == account.politician_id)
+        if (!belongsToThisRep.twitterAccounts) belongsToThisRep.twitterAccounts = [];
+        belongsToThisRep.twitterAccounts.push(account)
+    }
+    return district;
+}
+
+async function deleteThese(accounts) {
+    return new Promise(resolve => {
+        knex.transaction(async trx=> {
+            await Promise.all(accounts.map(dupe=>knex('tweets').where('snowflake_id', dupe.snowflake_id).limit(dupe.count - 1).del().transacting(trx)))
+            resolve();
+        })
+    })
 }
 
 (async () => {
+    const timeStart = new Date();
     console.time('twitter')
     let accounts = await getStaleDistrictTwitterAccounts();
     console.log(accounts.length)
     let districts = groupByDistrict(accounts);
-    // districts = districts.slice(0, 25)
 
     await getRateLimit();
 
@@ -267,12 +291,50 @@ async function buildJSONByDistrict(district_id) {
     console.time('db push')
     await saveToDB(districts);
     console.timeEnd('db push')
-    // for (let district of districts) {
-    //     if (district.updateJSON) { //rebuild JSON file if new tweets were acquired
-    //         let data = await buildJSONByDistrict(district.district_id)
-    //     }
-    // }
-    // let json = await buildJSONByDistrict(1)
-    // console.log(json)
+    
+    const staleJSON = districts.filter(d=>d.updateJSON);   //rebuild JSON file if new tweets were acquired
+    const JSONSUpdated = staleJSON.length;
+    console.log(`${JSONSUpdated} districts need new JSON files prepared`)
+    console.time('total json creation')
+    promises = [];
+    for (let district of staleJSON) {
+        let filename = `${district.state}-${district.district}.json`
+        console.time(`fetching for ${filename}`)
+        let data = await buildJSONByDistrict(district.district_id)
+        console.timeEnd(`fetching for ${filename}`)
+        
+        console.time(`uploading ${filename}`)
+        promises.push(uploadToS3(data, filename))
+        console.timeEnd(`uploading ${filename}`)
+
+    }
+    await Promise.all(promises)
+    console.timeEnd('total json creation')
+    
+    const timeElapsed = Math.floor((new Date() - timeStart) / 1000)
+
+    const message = `Run complete\n----------------\nTweets Grabbed: ${total_tweets_grabbed}\nJSON Updated: ${JSONSUpdated}\n----------------\nTime to Run: ${timeElapsed} seconds`
+    await twilioClient.messages.create({
+        body: message,
+        to: process.env.TWILIO_ADMIN_MOBILE,
+        from: process.env.TWILIO_FROM
+      })
     knex.destroy()
 })();
+
+// let dupes = await knex.raw('SELECT snowflake_id, COUNT(*) FROM tweets GROUP BY snowflake_id HAVING COUNT(*) > 1')
+// console.log('here we go')
+
+// while (dupes.rows.length) {
+//     let remaining = dupes.rows.length;
+//     console.log(`${remaining} dupes remaining`)
+//     console.time('delete')
+//     let promises = [];
+//     for (let i = 1; i < 16; i++) {
+//         promises.push(dupes.rows.splice(remaining - i * 5, 5))
+//     }
+    
+//     await Promise.all(promises.map(deleteThese))
+    
+//     console.timeEnd('delete')
+// }
