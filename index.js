@@ -192,16 +192,30 @@ async function saveToDB(districts) {
     
     //UPDATE accounts       TODO: add error handling
     console.time('updateAccounts')
-    result.updateAccounts = await knex.transaction(async trx => {
-        return Promise.all(accountRows.map(account=> knex('twitter_accounts').where('id', account.id).update(account).transacting(trx)))
-    })
+    // result.updateAccounts = await knex.transaction(async trx => {
+    //     return Promise.all(accountRows.map(account=> knex('twitter_accounts').where('id', account.id).update(account).transacting(trx)))
+    // })
+    try {
+        await knex.batchInsert('account_updates', accountRows)
+                .then(knex.raw('UPDATE twitter_accounts SET since_id = x.since_id, last_checked = x.last_checked, tweet_count = x.tweet_count FROM account_updates x WHERE twitter_accounts.id = x.id'))
+    } catch (e) {
+        console.error(e);
+    }
+
     console.timeEnd('updateAccounts')
 
     //UPDATE districts
     console.time('updateDistricts')
-    result.updateDistricts = await knex.transaction(async trx=> {
-        return Promise.all(districtRows.map(district=> knex('districts').where('id', district.id).update(district).transacting(trx)))
-    })
+    // result.updateDistricts = await knex.transaction(async trx=> {
+    //     return Promise.all(districtRows.map(district=> knex('districts').where('id', district.id).update(district).transacting(trx)))
+    // })
+    try {
+        await knex.batchInsert('district_updates', districtRows)
+                .then(knex.raw('UPDATE districts SET tweets_last_updated = x.tweets_last_updated FROM district_updates x WHERE districts.id = x.id'))
+    } catch (e) {
+        console.error(e);
+    }
+
     console.timeEnd('updateDistricts')
 
     if (accountDeletes.length) {
