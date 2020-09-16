@@ -192,12 +192,11 @@ async function saveToDB(districts) {
     
     //UPDATE accounts       TODO: add error handling
     console.time('updateAccounts')
-    // result.updateAccounts = await knex.transaction(async trx => {
-    //     return Promise.all(accountRows.map(account=> knex('twitter_accounts').where('id', account.id).update(account).transacting(trx)))
-    // })
+    
     try {
-        await knex.batchInsert('account_updates', accountRows)
-                .then(knex.raw('UPDATE twitter_accounts SET since_id = x.since_id, last_checked = x.last_checked, tweet_count = x.tweet_count FROM account_updates x WHERE twitter_accounts.id = x.id'))
+        await knex.batchInsert('account_updates', accountRows);
+        await knex.raw('UPDATE twitter_accounts SET since_id = x.since_id, last_checked = x.last_checked, tweet_count = x.tweet_count FROM account_updates x WHERE twitter_accounts.id = x.id');
+        await knex('account_updates').truncate();
     } catch (e) {
         console.error(e);
     }
@@ -206,12 +205,11 @@ async function saveToDB(districts) {
 
     //UPDATE districts
     console.time('updateDistricts')
-    // result.updateDistricts = await knex.transaction(async trx=> {
-    //     return Promise.all(districtRows.map(district=> knex('districts').where('id', district.id).update(district).transacting(trx)))
-    // })
+    
     try {
         await knex.batchInsert('district_updates', districtRows)
-                .then(knex.raw('UPDATE districts SET tweets_last_updated = x.tweets_last_updated FROM district_updates x WHERE districts.id = x.id'))
+        await knex.raw('UPDATE districts SET tweets_last_updated = x.tweets_last_updated FROM district_updates x WHERE districts.id = x.id')
+        await knex('district_updates').truncate();
     } catch (e) {
         console.error(e);
     }
@@ -287,6 +285,26 @@ async function deleteThese(accounts) {
     })
 }
 
+async function deleteDuplicateTweets() {
+    let dupes = await knex.raw('SELECT snowflake_id, COUNT(*) FROM tweets GROUP BY snowflake_id HAVING COUNT(*) > 1')
+    console.log('here we go')
+
+    while (dupes.rows.length) {
+        let remaining = dupes.rows.length;
+        console.log(`${remaining} dupes remaining`)
+        console.time('delete')
+        let promises = [];
+        for (let i = 1; i < 16; i++) {
+            promises.push(dupes.rows.splice(remaining - i, 1))
+        }
+        
+        await Promise.all(promises.map(deleteThese))
+        
+        console.timeEnd('delete')
+    }
+
+}
+
 (async () => {
     const timeStart = new Date();
     console.time('twitter')
@@ -335,20 +353,3 @@ async function deleteThese(accounts) {
       })
     knex.destroy()
 })();
-
-// let dupes = await knex.raw('SELECT snowflake_id, COUNT(*) FROM tweets GROUP BY snowflake_id HAVING COUNT(*) > 1')
-// console.log('here we go')
-
-// while (dupes.rows.length) {
-//     let remaining = dupes.rows.length;
-//     console.log(`${remaining} dupes remaining`)
-//     console.time('delete')
-//     let promises = [];
-//     for (let i = 1; i < 16; i++) {
-//         promises.push(dupes.rows.splice(remaining - i * 5, 5))
-//     }
-    
-//     await Promise.all(promises.map(deleteThese))
-    
-//     console.timeEnd('delete')
-// }
