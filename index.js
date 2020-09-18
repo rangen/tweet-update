@@ -351,11 +351,15 @@ async function deleteDuplicateTweets() {
     const timeElapsed = Math.floor((new Date() - timeStart) / 1000)
 
     const message = `Run complete\n----------------\nTweets Grabbed: ${total_tweets_grabbed}\nJSON Updated: ${JSONSUpdated}\n----------------\nTime to Run: ${timeElapsed} seconds`
-    await twilioClient.messages.create({
-        body: message,
-        to: process.env.TWILIO_ADMIN_MOBILE,
-        from: process.env.TWILIO_FROM
-      })
+    try {
+        await twilioClient.messages.create({
+            body: message,
+            to: process.env.TWILIO_ADMIN_MOBILE,
+            from: process.env.TWILIO_FROM
+        })
+    } catch(e) {
+        console.log(e)
+    }
     multibar.stop();
     knex.destroy()
 })();
