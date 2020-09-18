@@ -12,6 +12,9 @@ s3.config.update({
     secretAccessKey:    process.env.AWS_SECRET
 });
 
+const cliProgress = require('cli-progress');
+let queryProgress, s3UploadsProgress;
+
 // Milliseconds for staleAccount query (twitterAccounts to be updated)
 const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 3600000
 
@@ -250,7 +253,7 @@ async function uploadToS3(JSONobject, filename) {
     }
 
     await s3.putObject(params).promise()
-        .then(r=>console.log(r))
+        .then(()=>s3UploadsProgress.increment())
         .catch(err=>console.log(err))
 }
 
@@ -320,7 +323,8 @@ async function deleteDuplicateTweets() {
     console.timeEnd('twitter')
     console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
     console.log(`Calls remaining this window: ${window_rate}`)
-    console.time('db push')
+    console.time('db push');
+
     await saveToDB(districts);
     console.timeEnd('db push')
     
@@ -328,20 +332,21 @@ async function deleteDuplicateTweets() {
     const JSONSUpdated = staleJSON.length;
     console.log(`${JSONSUpdated} districts need new JSON files prepared`)
     console.time('total json creation')
+
     promises = [];
+    const multibar = new cliProgress.MultiBar({clearOnComplete: false, hideCursor: true}, cliProgress.Presets.shades_grey)
+    queryProgress = multibar.create(JSONSUpdated, 0, {format: 'JSON Build [{bar}] {percentage}% | {value}/{total} | ETA: {eta}s', stopOnComplete: true});
+    s3UploadsProgress = multibar.create(JSONSUpdated, 0, {format: 'S3 Upload [{bar}] {percentage}% | {value}/{total} | ETA: {eta}s', clearOnComplete: true});
+
     for (let district of staleJSON) {
         let filename = `${district.state}-${district.district}.json`
-        console.time(`fetching for ${filename}`)
         let data = await buildJSONByDistrict(district.district_id)
-        console.timeEnd(`fetching for ${filename}`)
+        queryProgress.increment();
         
-        console.time(`uploading ${filename}`)
         promises.push(uploadToS3(data, filename))
-        console.timeEnd(`uploading ${filename}`)
 
     }
     await Promise.all(promises)
-    console.timeEnd('total json creation')
     
     const timeElapsed = Math.floor((new Date() - timeStart) / 1000)
 
@@ -351,5 +356,6 @@ async function deleteDuplicateTweets() {
         to: process.env.TWILIO_ADMIN_MOBILE,
         from: process.env.TWILIO_FROM
       })
+    multibar.stop();
     knex.destroy()
 })();
