@@ -1,13 +1,13 @@
-const knex = require('./db')
+const knex = require('./db');
 
 const twitter = require('./twitter');
 
 const Bottleneck = require('bottleneck');
 
-const twilio = require('twilio')
+const twilio = require('twilio');
 let twilioClient = new twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
-const AWS = require('aws-sdk')
+const AWS = require('aws-sdk');
 const s3 = new AWS.S3();
 s3.config.update({
     accessKeyId:    process.env.AWS_ID,
@@ -18,7 +18,7 @@ const cliProgress = require('cli-progress');
 let queryProgress, s3UploadsProgress;
 
 // Milliseconds for staleAccount query (twitterAccounts to be updated)
-const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 3600000
+const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 3600000;
 
 // Global boolean to halt execution when 15-minute rate threshold crossed to avoid API key abuse
 let rate_limited_exceeded = false;
@@ -28,22 +28,22 @@ let total_tweets_grabbed = 0;
 
 //helper function to decrement tweetIDs that exceed JS 32-bit int range
 function decrementString(str) {
-    if (!str) return '1'
+    if (!str) return '1';
     // If content (leading digit after max recursion) is 1, return empty to prevent leading 0s in specifically 10000..00
-    if (str === '1') return ''
+    if (str === '1') return '';
     
     lastIndex = str.length - 1;
     lastChar = str[lastIndex];
     
     if (str[lastIndex] === '0') {
         //Use recursion to work back from final digit until a non-zero digit is found, replacing zeros with 9s
-        return decrementString(str.slice(0, -1)).concat('9')
+        return decrementString(str.slice(0, -1)).concat('9');
     } else {
         //when a non-zero digit is encountered, we can decrement that digit and finish
-        str = str.slice(0, -1).concat(~~lastChar - 1)
+        str = str.slice(0, -1).concat(~~lastChar - 1);
     }
     
-    return str
+    return str;
 }
 
 async function getStaleDistrictTwitterAccounts() {
@@ -57,7 +57,7 @@ async function getStaleDistrictTwitterAccounts() {
         .select(knex.ref('districts.id').as('district_id'))
         .select(knex.ref('twitter_accounts.id').as('account_id'))
         .select('twitter_accounts.since_id', 'twitter_accounts.handle', 'twitter_accounts.last_checked', 'twitter_accounts.tweet_count')
-        .select('states.abbreviation', 'districts.number', 'reps.candidate_name')
+        .select('states.abbreviation', 'districts.number', 'reps.candidate_name');
 }
 async function getStaleStateTwitterAccounts() {
     return await knex('states')
@@ -69,7 +69,7 @@ async function getStaleStateTwitterAccounts() {
         .select(knex.ref('states.id').as('state_id'))
         .select(knex.ref('twitter_accounts.id').as('account_id'))
         .select('twitter_accounts.since_id', 'twitter_accounts.handle', 'twitter_accounts.last_checked', 'twitter_accounts.tweet_count')
-        .select('states.abbreviation', 'senators.candidate_name')
+        .select('states.abbreviation', 'senators.candidate_name');
 }
 
 function groupByDistrict(accounts) {
@@ -86,7 +86,7 @@ function groupByDistrict(accounts) {
                 updateReady: false,
                 updateJSON: false,
                 accounts: []
-                }
+                };
         }
         // once initialized, twitter_accounts w relevant info can be added to accounts array
         grouped[a.district_id].accounts.push(
@@ -99,14 +99,14 @@ function groupByDistrict(accounts) {
                 // newSinceID: a.since_id, //set to default for future batch Update operation; will be replaced if new tweet found
                 newTweets: [],
                 checked: false
-            })
+            });
     })
    
-    return Object.values(grouped)
+    return Object.values(grouped);
 }
 function groupByState(accounts) {
     // Create object to track accounts updated by state
-    grouped = {};
+    let grouped = {};
 
     accounts.forEach(a=> {
         // initialize object key with state_id if it doesn't exist
@@ -117,7 +117,7 @@ function groupByState(accounts) {
                 updateReady: false,
                 updateJSON: false,
                 accounts: []
-                }
+                };
         }
         // once initialized, twitter_accounts w relevant info can be added to accounts array
         grouped[a.state_id].accounts.push(
@@ -130,16 +130,16 @@ function groupByState(accounts) {
                 // newSinceID: a.since_id, //set to default for future batch Update operation; will be replaced if new tweet found
                 newTweets: [],
                 checked: false
-            })
+            });
     })
    
-    return Object.values(grouped)
+    return Object.values(grouped);
 }
 
 function fetchTweets(region) {
     return new Promise(async resolve=>{
-        let promises = region.accounts.map(retrieveNewTweets)
-        await Promise.all(promises)
+        let promises = region.accounts.map(retrieveNewTweets);
+        await Promise.all(promises);
             // .catch(()=>console.log("Rate limit exceeded"))
 
 
@@ -170,31 +170,31 @@ async function retrieveNewTweets(account) {
                 count: 200,
                 trim_user: true,
                 since_id: oldestInDB
-            }
+            };
             //maxID is only sent to API on calls after the first, when more than one batch of tweets needs to be retrieved  (and needs to be decremented as max_id is inclusive for twitter API)
-            if (maxID) {params.max_id = decrementString(maxID)}
+            if (maxID) {params.max_id = decrementString(maxID)};
             
             window_rate--;
-            if (window_rate < 0) { rate_limited_exceeded = true;}
+            if (window_rate < 0) rate_limited_exceeded = true;
 
             if (rate_limited_exceeded) {
                 resolve();
-                return //Promise.reject('3423rasdfsf')//Anything more useful?  reject? 
+                return; 
             }
 
             try {
                 attempt++;
                 console.log(`Entering fetch for attempt #${attempt}`);
-                tweets = await twitter.get('statuses/user_timeline', params)
+                tweets = await twitter.get('statuses/user_timeline', params);
             } catch(e) {
                 if (e.errors) {   // e.errors represents an error after a successful Twitter API call
-                    console.log(`Error caught for ${account.handle}: ${e.errors[0].message}`)
+                    console.log(`Error caught for ${account.handle}: ${e.errors[0].message}`);
                     if (e.errors[0].code === 34) account.deleteMe = true;
                     resolve();
                     return;
                 } else {
-                    let status = e._headers && e._headers.get('status')
-                    console.log(`Other Error caught for ${account.handle}: ${status}`)
+                    let status = e._headers && e._headers.get('status');
+                    console.log(`Other Error caught for ${account.handle}: ${status}`);
                     if (status === '401 Unauthorized') {
                         account.deleteMe = true;
                         account.checked = true;
@@ -205,11 +205,11 @@ async function retrieveNewTweets(account) {
             }
 
             if (tweets.length) {
-                maxID = tweets[tweets.length - 1].id_str    //save for a repeat loop now
+                maxID = tweets[tweets.length - 1].id_str;    //save for a repeat loop now
                 if (!account.newSinceID) account.newSinceID = tweets[0].id_str; //set new sinceID for DB
 
-                let newTweetInfo = tweets.map(a=>({snowflake_id: a.id_str, created: a.created_at}))
-                account.newTweets.push(...newTweetInfo)
+                let newTweetInfo = tweets.map(a=>({snowflake_id: a.id_str, created: a.created_at}));
+                account.newTweets.push(...newTweetInfo);
 
                 total_tweets_grabbed += newTweetInfo.length;
                 if (tweets.length < 180) tweetsAvailable = false;
@@ -230,13 +230,13 @@ async function saveToDB(districts, states) {
     for (let district of districts) {
         if (!district.updateReady) continue; // Skip if twitter update failed
 
-        districtRows.push({id: district.district_id, tweets_last_updated: new Date()})
+        districtRows.push({id: district.district_id, tweets_last_updated: new Date()});
         for (let account of district.accounts) {
-            if (account.deleteMe) accountDeletes.push(account.twitter_account_id)
+            if (account.deleteMe) accountDeletes.push(account.twitter_account_id);
             if (account.newSinceID && account.newLastChecked) { //Skip if Account invalid
-                accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count})
+                accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count});
                 for (let tweet of account.newTweets) {
-                    tweetRows.push({twitter_account_id: account.twitter_account_id, ...tweet})
+                    tweetRows.push({twitter_account_id: account.twitter_account_id, ...tweet});
                 }
             }    
         }
@@ -245,25 +245,25 @@ async function saveToDB(districts, states) {
     for (let state of states) {
         if (!state.updateReady) continue; // Skip if twitter update failed
 
-        stateRows.push({id: state.state_id, tweets_last_updated: new Date()})
+        stateRows.push({id: state.state_id, tweets_last_updated: new Date()});
         for (let account of state.accounts) {
-            if (account.deleteMe) accountDeletes.push(account.twitter_account_id)
+            if (account.deleteMe) accountDeletes.push(account.twitter_account_id);
             if (account.newSinceID && account.newLastChecked) { //Skip if Account invalid
-                accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count})
+                accountRows.push({id: account.twitter_account_id, since_id: account.newSinceID, last_checked: account.newLastChecked, tweet_count: account.numNew + account.tweet_count});
                 for (let tweet of account.newTweets) {
-                    tweetRows.push({twitter_account_id: account.twitter_account_id, ...tweet})
+                    tweetRows.push({twitter_account_id: account.twitter_account_id, ...tweet});
                 }
             }    
         }
     }
 
     //INSERT into tweets
-    console.time('insertTweets')
-    await knex.batchInsert('tweets', tweetRows)
-    console.timeEnd('insertTweets')
+    console.time('insertTweets');
+    await knex.batchInsert('tweets', tweetRows);
+    console.timeEnd('insertTweets');
     
     //UPDATE accounts       TODO: add error handling
-    console.time('updateAccounts')
+    console.time('updateAccounts');
     
     try {
         await knex.batchInsert('account_updates', accountRows);
@@ -273,55 +273,55 @@ async function saveToDB(districts, states) {
         console.error(e);
     }
 
-    console.timeEnd('updateAccounts')
+    console.timeEnd('updateAccounts');
 
     //UPDATE districts
-    console.time('updateDistricts')
+    console.time('updateDistricts');
     
     try {
-        await knex.batchInsert('district_updates', districtRows)
-        await knex.raw('UPDATE districts SET tweets_last_updated = x.tweets_last_updated FROM district_updates x WHERE districts.id = x.id')
+        await knex.batchInsert('district_updates', districtRows);
+        await knex.raw('UPDATE districts SET tweets_last_updated = x.tweets_last_updated FROM district_updates x WHERE districts.id = x.id');
         await knex('district_updates').truncate();
     } catch (e) {
         console.error(e);
     }
 
-    console.timeEnd('updateDistricts')
+    console.timeEnd('updateDistricts');
 
     //UPDATE states
-    console.time('updateStates')
+    console.time('updateStates');
     
     try {
-        await knex.batchInsert('state_updates', stateRows)
-        await knex.raw('UPDATE states SET tweets_last_updated = x.tweets_last_updated FROM state_updates x WHERE states.id = x.id')
+        await knex.batchInsert('state_updates', stateRows);
+        await knex.raw('UPDATE states SET tweets_last_updated = x.tweets_last_updated FROM state_updates x WHERE states.id = x.id');
         await knex('state_updates').truncate();
     } catch (e) {
         console.error(e);
     }
 
-    console.timeEnd('updateStates')
+    console.timeEnd('updateStates');
 
     if (accountDeletes.length) {
         //DELETE deleted / privatized twitter_accounts & any associated tweets
-        console.time('deleteAccounts')
-        result.deleteAccounts = await knex.transaction(async trx=> {
-            return Promise.all(accountDeletes.map(account=> knex('twitter_accounts').where('id', account).del().transacting(trx)))
-        })
-        result.deleteTweets = await knex.transaction(async trx=> {
-            return Promise.all(accountDeletes.map(account=> knex('tweets').where('twitter_account_id', account).del().transacting(trx)))
-        })
-        console.timeEnd('deleteAccounts')
+        console.time('deleteAccounts');
+        await knex.transaction(async trx=> {
+            return Promise.all(accountDeletes.map(account=> knex('twitter_accounts').where('id', account).del().transacting(trx)));
+        });
+        await knex.transaction(async trx=> {
+            return Promise.all(accountDeletes.map(account=> knex('tweets').where('twitter_account_id', account).del().transacting(trx)));
+        });
+        console.timeEnd('deleteAccounts');
     }
     return 'pizza';
 }
 
 async function getRateLimit() {
-    let response = await twitter.get('statuses/user_timeline', {screen_name: 'realdonaldtrump', count: 1})
+    let response = await twitter.get('statuses/user_timeline', {screen_name: 'realdonaldtrump', count: 1});
 
-    window_rate = ~~response._headers.get('x-rate-limit-remaining')
+    window_rate = ~~response._headers.get('x-rate-limit-remaining');
     let reset_time = (new Date(response._headers.get('x-rate-limit-reset') * 1000)).toString();
-    console.log(`Calls remaining this window: ${window_rate}`)
-    console.log(`Resets at: ${reset_time}`)
+    console.log(`Calls remaining this window: ${window_rate}`);
+    console.log(`Resets at: ${reset_time}`);
 }
 
 async function uploadToS3(JSONobject, filename) {
@@ -332,38 +332,38 @@ async function uploadToS3(JSONobject, filename) {
         ContentType:    "application/json",
         ACL:    'public-read',
         CacheControl: `max-age=${3600 * process.env.HOURS_SINCE_LAST_CHECKED}`
-    }
+    };
 
     await s3.putObject(params).promise()
         .then(()=>s3UploadsProgress.increment())
-        .catch(err=>console.log(err))
+        .catch(err=>console.log(err));
 }
 
 async function buildJSONByDistrict(district_id) {
     let district = {};
     district.reps = await knex('reps')
-        .where('reps.district_id', district_id)
+        .where('reps.district_id', district_id);
         // .select('reps.candidate_loan_repayments', 'reps.candidate_name', 'reps.cash_on_hand_end', 'reps.cash_on_hand_start', 'reps.comm_refunds', 'reps.contrib_from_other_comms')
         // .select('reps.contrib_from_party_comms', 'reps.contributions_from_candidate', 'reps.coverage_end_date', 'reps.debts')
-    let repIDs = district.reps.map(r=>r.id)
+    let repIDs = district.reps.map(r=>r.id);
     let twitterAccounts = await knex('twitter_accounts')
         .where('politician_type', 'Rep')
-        .whereIn('politician_id', repIDs)
+        .whereIn('politician_id', repIDs);
     for (account of twitterAccounts) {
         account.tweets = await knex('tweets')
             .where('twitter_account_id', account.id)
             .orderBy('created', 'desc')
-            .select('snowflake_id', 'created')
-        let belongsToThisRep = district.reps.find(r=>r.id == account.politician_id)
+            .select('snowflake_id', 'created');
+        let belongsToThisRep = district.reps.find(r=>r.id == account.politician_id);
         if (!belongsToThisRep.twitterAccounts) belongsToThisRep.twitterAccounts = [];
-        belongsToThisRep.twitterAccounts.push(account)
+        belongsToThisRep.twitterAccounts.push(account);
     }
     return district;
 }
 async function buildJSONByState(state_id) {
     let state = {};
     state.senators = await knex('senators')
-        .where('senators.state_id', state_id)
+        .where('senators.state_id', state_id);
     let senatorIDs = state.senators.map(s=>s.id)
     let twitterAccounts = await knex('twitter_accounts')
         .where('politician_type', 'Senator')
@@ -422,7 +422,7 @@ async function deleteDuplicateTweets() {
     await getRateLimit();
     
     const limiter = new Bottleneck({
-        maxConcurrent: 5
+        maxConcurrent: process.env.MAX_CONCURRENT_FETCHES
     })
 
     const throttledFetchTweets = limiter.wrap(fetchTweets);
