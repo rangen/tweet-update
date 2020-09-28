@@ -2,6 +2,8 @@ const knex = require('./db')
 
 const twitter = require('./twitter');
 
+const Bottleneck = require('bottleneck');
+
 const twilio = require('twilio')
 let twilioClient = new twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
@@ -72,7 +74,7 @@ async function getStaleStateTwitterAccounts() {
 
 function groupByDistrict(accounts) {
     // Create object to track accounts updated by district
-    grouped = {};
+    let grouped = {};
 
     accounts.forEach(a=> {
         // initialize object key with district_id if it doesn't exist
@@ -153,65 +155,74 @@ function fetchTweets(region) {
         resolve();
     })
 }
-
+let attempt = 0;
 async function retrieveNewTweets(account) {
-    //Used by Twitter for pagination
-    let oldestInDB = account.sinceID;
-    let maxID;
-    let tweetsAvailable = true;
-    let tweets = [];
+    return new Promise(async resolve => {
+        //Used by Twitter for pagination
+        let oldestInDB = account.sinceID;
+        let maxID;
+        let tweetsAvailable = true;
+        let tweets = [];
 
-    while (tweetsAvailable) {
-        const params = {
-            screen_name: account.handle,
-            count: 200,
-            trim_user: true,
-            since_id: oldestInDB
-        }
-        //maxID is only sent to API on calls after the first, when more than one batch of tweets needs to be retrieved  (and needs to be decremented as max_id is inclusive for twitter API)
-        if (maxID) {params.max_id = decrementString(maxID)}
-        
-        window_rate--;
-        if (window_rate < 0) { rate_limited_exceeded = true;}
-
-        if (rate_limited_exceeded) {
-            return //Promise.reject('3423rasdfsf')//Anything more useful?  reject? 
-        }
-
-        try {
-            tweets = await twitter.get('statuses/user_timeline', params)
-        } catch(e) {
-            if (e.errors) {   // e.errors represents an error after a successful Twitter API call
-                console.log(`Error caught for ${account.handle}: ${e.errors[0].message}`)
-                if (e.errors[0].code === 34) account.deleteMe = true;
-                return //Promise.resolve?
-            } else {
-                let status = e._headers && e._headers.get('status')
-                console.log(`Other Error caught for ${account.handle}: ${status}`)
-                if (status === '401 Unauthorized') account.deleteMe = true;
-                account.checked = true;    //consider adding a retry after we ascertain which errors throws this clause
-                // will future calls succeed? should we log this?
-                return //Promise.resolve / reject? and switch main code to allSettled?
+        while (tweetsAvailable) {
+            const params = {
+                screen_name: account.handle,
+                count: 200,
+                trim_user: true,
+                since_id: oldestInDB
             }
+            //maxID is only sent to API on calls after the first, when more than one batch of tweets needs to be retrieved  (and needs to be decremented as max_id is inclusive for twitter API)
+            if (maxID) {params.max_id = decrementString(maxID)}
+            
+            window_rate--;
+            if (window_rate < 0) { rate_limited_exceeded = true;}
+
+            if (rate_limited_exceeded) {
+                resolve();
+                return //Promise.reject('3423rasdfsf')//Anything more useful?  reject? 
+            }
+
+            try {
+                attempt++;
+                console.log(`Entering fetch for attempt #${attempt}`);
+                tweets = await twitter.get('statuses/user_timeline', params)
+            } catch(e) {
+                if (e.errors) {   // e.errors represents an error after a successful Twitter API call
+                    console.log(`Error caught for ${account.handle}: ${e.errors[0].message}`)
+                    if (e.errors[0].code === 34) account.deleteMe = true;
+                    resolve();
+                    return;
+                } else {
+                    let status = e._headers && e._headers.get('status')
+                    console.log(`Other Error caught for ${account.handle}: ${status}`)
+                    if (status === '401 Unauthorized') {
+                        account.deleteMe = true;
+                        account.checked = true;
+                        resolve();
+                        return;
+                    }
+                }
+            }
+
+            if (tweets.length) {
+                maxID = tweets[tweets.length - 1].id_str    //save for a repeat loop now
+                if (!account.newSinceID) account.newSinceID = tweets[0].id_str; //set new sinceID for DB
+
+                let newTweetInfo = tweets.map(a=>({snowflake_id: a.id_str, created: a.created_at}))
+                account.newTweets.push(...newTweetInfo)
+
+                total_tweets_grabbed += newTweetInfo.length;
+                if (tweets.length < 180) tweetsAvailable = false;
+            } else {
+                tweetsAvailable = false;
+                if (!account.newSinceID) account.newSinceID = account.sinceID;
+            }    
         }
-
-        if (tweets.length) {
-            maxID = tweets[tweets.length - 1].id_str    //save for a repeat loop now
-            if (!account.newSinceID) account.newSinceID = tweets[0].id_str; //set new sinceID for DB
-
-            let newTweetInfo = tweets.map(a=>({snowflake_id: a.id_str, created: a.created_at}))
-            account.newTweets.push(...newTweetInfo)
-
-            total_tweets_grabbed += newTweetInfo.length;
-            if (tweets.length < 180) tweetsAvailable = false;
-        } else {
-            tweetsAvailable = false;
-            if (!account.newSinceID) account.newSinceID = account.sinceID;
-        }    
-    }
-    account.checked = true;
-    account.newLastChecked = new Date();
-    account.numNew = account.newTweets.length;
+        account.checked = true;
+        account.newLastChecked = new Date();
+        account.numNew = account.newTweets.length;
+        resolve();
+    });
 }
 
 async function saveToDB(districts, states) {
@@ -410,8 +421,14 @@ async function deleteDuplicateTweets() {
 
     await getRateLimit();
     
+    const limiter = new Bottleneck({
+        maxConcurrent: 5
+    })
+
+    const throttledFetchTweets = limiter.wrap(fetchTweets);
+
     //Could probably combine into one routine but maybe good to do districts first to perhaps complete in case both cannot get in under API cap
-    let promises = districts.map(fetchTweets)
+    let promises = districts.map(throttledFetchTweets)
     await Promise.all(promises)
     
     promises = states.map(fetchTweets);
@@ -426,6 +443,7 @@ async function deleteDuplicateTweets() {
     console.timeEnd('db push')
     
     const staleJSON = districts.filter(d=>d.updateJSON);   //rebuild JSON file if new tweets were acquired
+    const numDistricts = staleJSON.length;
     staleJSON.push(...states.filter(s=>s.updateJSON))
 
     const JSONSUpdated = staleJSON.length;
@@ -455,16 +473,16 @@ async function deleteDuplicateTweets() {
     
     const timeElapsed = Math.floor((new Date() - timeStart) / 1000)
 
-    // const message = `Run complete\n----------------\nTweets Grabbed: ${total_tweets_grabbed}\nJSON Updated: ${JSONSUpdated}\n----------------\nTime to Run: ${timeElapsed} seconds\nNervous to talk to you but also excited   What a day`
-    // try {
-    //     await twilioClient.messages.create({
-    //         body: message,
-    //         to: process.env.TWILIO_ADMIN_MOBILE,
-    //         from: process.env.TWILIO_FROM
-    //     })
-    // } catch(e) {
-    //     console.log(e)
-    // }
+    const message = `Run complete\n----------------\nTweets Grabbed: ${total_tweets_grabbed}\nJSON Updated: ${JSONSUpdated}\n--States: ${JSONSUpdated - numDistricts}\n--Districts: ${numDistricts}\n----------------\nTime to Run: ${timeElapsed} seconds`;
+    try {
+        await twilioClient.messages.create({
+            body: message,
+            to: process.env.TWILIO_ADMIN_MOBILE,
+            from: process.env.TWILIO_FROM
+        })
+    } catch(e) {
+        console.log(e)
+    }
     multibar.stop();
     knex.destroy()
 })();
