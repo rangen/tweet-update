@@ -310,7 +310,7 @@ async function saveToDB(districts, states) {
         });
         console.timeEnd('deleteAccounts');
     }
-    return 'pizza';
+    return;
 }
 
 async function getRateLimit() {
