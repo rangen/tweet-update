@@ -155,7 +155,7 @@ function fetchTweets(region) {
         resolve();
     })
 }
-let attempt = 0;
+
 async function retrieveNewTweets(account) {
     return new Promise(async resolve => {
         //Used by Twitter for pagination
@@ -183,8 +183,6 @@ async function retrieveNewTweets(account) {
             }
 
             try {
-                attempt++;
-                console.log(`Entering fetch for attempt #${attempt}`);
                 tweets = await twitter.get('statuses/user_timeline', params);
             } catch(e) {
                 if (e.errors) {   // e.errors represents an error after a successful Twitter API call
