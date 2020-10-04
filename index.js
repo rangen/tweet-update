@@ -353,8 +353,17 @@ async function buildJSONByDistrict(district_id) {
             .orderBy('created', 'desc')
             .select('snowflake_id', 'created');
         let belongsToThisRep = district.reps.find(r=>r.id == account.politician_id);
-        if (!belongsToThisRep.twitterAccounts) belongsToThisRep.twitterAccounts = [];
-        belongsToThisRep.twitterAccounts.push(account);
+        if (!belongsToThisRep.tweets) belongsToThisRep.tweets = [];
+        belongsToThisRep.tweets.push(...account.tweets);
+    }
+    for (let rep of district.reps) {
+        rep.tweets.sort((a, b) => {
+            let [one, two] = [a.snowflake_id, b.snowflake_id];
+            if (one.length !== two.length) {
+                return (one.length > two.length ? -1 : 1);
+            }
+            return (one > two ? -1 : 1);
+        })
     }
     return district;
 }
@@ -372,8 +381,17 @@ async function buildJSONByState(state_id) {
             .orderBy('created', 'desc')
             .select('snowflake_id', 'created')
         let belongsToThisSenator = state.senators.find(s=>s.id == account.politician_id)
-        if (!belongsToThisSenator.twitterAccounts) belongsToThisSenator.twitterAccounts = [];
-        belongsToThisSenator.twitterAccounts.push(account)
+        if (!belongsToThisSenator.tweets) belongsToThisSenator.tweets = [];
+        belongsToThisSenator.tweets.push(...account.tweets)
+    }
+    for (let senator of state.senators) {
+        senator.tweets.sort((a, b) => {
+            let [one, two] = [a.snowflake_id, b.snowflake_id];
+            if (one.length !== two.length) {
+                return (one.length > two.length ? -1 : 1);
+            }
+            return (one > two ? -1 : 1);
+        })
     }
     return state;
 }
@@ -437,9 +455,11 @@ async function deleteDuplicateTweets() {
     console.log(`Calls remaining this window: ${window_rate}`)
     console.time('db push');
 
-    await saveToDB(districts, states);
+    // await saveToDB(districts, states);
     console.timeEnd('db push')
-    
+
+    let data = await buildJSONByState(states[0].state_id);    
+    console.log(data);
     const staleJSON = districts.filter(d=>d.updateJSON);   //rebuild JSON file if new tweets were acquired
     const numDistricts = staleJSON.length;
     staleJSON.push(...states.filter(s=>s.updateJSON))
@@ -482,5 +502,5 @@ async function deleteDuplicateTweets() {
         console.log(e)
     }
     multibar.stop();
-    knex.destroy()
+    knex.destroy();
 })();
