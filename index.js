@@ -7,15 +7,13 @@ const Bottleneck = require('bottleneck');
 const twilio = require('twilio');
 let twilioClient = new twilio(process.env.TWILIO_ACCOUNT_SID, process.env.TWILIO_AUTH_TOKEN);
 
+
 const AWS = require('aws-sdk');
 const s3 = new AWS.S3();
 s3.config.update({
     accessKeyId:    process.env.AWS_ID,
     secretAccessKey:    process.env.AWS_SECRET
 });
-
-const cliProgress = require('cli-progress');
-let queryProgress, s3UploadsProgress;
 
 // Milliseconds for staleAccount query (twitterAccounts to be updated)
 const SINCE_LAST_CHECKED = process.env.HOURS_SINCE_LAST_CHECKED * 3600000;
@@ -25,6 +23,8 @@ let rate_limited_exceeded = false;
 //will set remaining in 15-minute window via initial dummy API call
 let window_rate;
 let total_tweets_grabbed = 0;
+//Global boolean to send SMS on error
+let errorCaught = false;
 
 //helper function to decrement tweetIDs that exceed JS 32-bit int range
 function decrementString(str) {
@@ -32,8 +32,8 @@ function decrementString(str) {
     // If content (leading digit after max recursion) is 1, return empty to prevent leading 0s in specifically 10000..00
     if (str === '1') return '';
     
-    lastIndex = str.length - 1;
-    lastChar = str[lastIndex];
+    let lastIndex = str.length - 1;
+    let lastChar = str[lastIndex];
     
     if (str[lastIndex] === '0') {
         //Use recursion to work back from final digit until a non-zero digit is found, replacing zeros with 9s
@@ -100,7 +100,7 @@ function groupByDistrict(accounts) {
                 newTweets: [],
                 checked: false
             });
-    })
+    });
    
     return Object.values(grouped);
 }
@@ -131,7 +131,7 @@ function groupByState(accounts) {
                 newTweets: [],
                 checked: false
             });
-    })
+    });
    
     return Object.values(grouped);
 }
@@ -153,7 +153,7 @@ function fetchTweets(region) {
             }
         }
         resolve();
-    })
+    });
 }
 
 async function retrieveNewTweets(account) {
@@ -169,10 +169,12 @@ async function retrieveNewTweets(account) {
                 screen_name: account.handle,
                 count: 200,
                 trim_user: true,
-                since_id: oldestInDB
+                since_id: oldestInDB,
+                exclude_replies: true,
+                include_rts:    true
             };
             //maxID is only sent to API on calls after the first, when more than one batch of tweets needs to be retrieved  (and needs to be decremented as max_id is inclusive for twitter API)
-            if (maxID) {params.max_id = decrementString(maxID)};
+            if (maxID) params.max_id = decrementString(maxID);
             
             window_rate--;
             if (window_rate < 0) rate_limited_exceeded = true;
@@ -192,6 +194,7 @@ async function retrieveNewTweets(account) {
                     return;
                 } else {
                     let status = e._headers && e._headers.get('status');
+                    errorCaught = true;
                     console.log(`Other Error caught for ${account.handle}: ${status}`);
                     if (status === '401 Unauthorized') {
                         account.deleteMe = true;
@@ -310,7 +313,7 @@ async function saveToDB(districts, states) {
         });
         console.timeEnd('deleteAccounts');
     }
-    return;
+    return 'pizza';
 }
 
 async function getRateLimit() {
@@ -333,7 +336,6 @@ async function uploadToS3(JSONobject, filename) {
     };
 
     await s3.putObject(params).promise()
-        .then(()=>s3UploadsProgress.increment())
         .catch(err=>console.log(err));
 }
 
@@ -347,7 +349,7 @@ async function buildJSONByDistrict(district_id) {
     let twitterAccounts = await knex('twitter_accounts')
         .where('politician_type', 'Rep')
         .whereIn('politician_id', repIDs);
-    for (account of twitterAccounts) {
+    for (let account of twitterAccounts) {
         account.tweets = await knex('tweets')
             .where('twitter_account_id', account.id)
             .orderBy('created', 'desc')
@@ -357,13 +359,14 @@ async function buildJSONByDistrict(district_id) {
         belongsToThisRep.tweets.push(...account.tweets);
     }
     for (let rep of district.reps) {
-        rep.tweets.sort((a, b) => {
+        if (!rep.tweets) continue; 
+            rep.tweets.sort((a, b) => {
             let [one, two] = [a.snowflake_id, b.snowflake_id];
             if (one.length !== two.length) {
                 return (one.length > two.length ? -1 : 1);
             }
             return (one > two ? -1 : 1);
-        })
+        });
     }
     return district;
 }
@@ -371,63 +374,35 @@ async function buildJSONByState(state_id) {
     let state = {};
     state.senators = await knex('senators')
         .where('senators.state_id', state_id);
-    let senatorIDs = state.senators.map(s=>s.id)
+    let senatorIDs = state.senators.map(s=>s.id);
     let twitterAccounts = await knex('twitter_accounts')
         .where('politician_type', 'Senator')
-        .whereIn('politician_id', senatorIDs)
-    for (account of twitterAccounts) {
+        .whereIn('politician_id', senatorIDs);
+    for (let account of twitterAccounts) {
         account.tweets = await knex('tweets')
             .where('twitter_account_id', account.id)
             .orderBy('created', 'desc')
-            .select('snowflake_id', 'created')
-        let belongsToThisSenator = state.senators.find(s=>s.id == account.politician_id)
+            .select('snowflake_id', 'created');
+        let belongsToThisSenator = state.senators.find(s=>s.id == account.politician_id);
         if (!belongsToThisSenator.tweets) belongsToThisSenator.tweets = [];
-        belongsToThisSenator.tweets.push(...account.tweets)
+        belongsToThisSenator.tweets.push(...account.tweets);
     }
     for (let senator of state.senators) {
+        if (!senator.tweets) continue;
         senator.tweets.sort((a, b) => {
             let [one, two] = [a.snowflake_id, b.snowflake_id];
             if (one.length !== two.length) {
                 return (one.length > two.length ? -1 : 1);
             }
             return (one > two ? -1 : 1);
-        })
+        });
     }
     return state;
 }
 
-async function deleteThese(accounts) {
-    return new Promise(resolve => {
-        knex.transaction(async trx=> {
-            await Promise.all(accounts.map(dupe=>knex('tweets').where('snowflake_id', dupe.snowflake_id).limit(dupe.count - 1).del().transacting(trx)))
-            resolve();
-        })
-    })
-}
-
-async function deleteDuplicateTweets() {
-    let dupes = await knex.raw('SELECT snowflake_id, COUNT(*) FROM tweets GROUP BY snowflake_id HAVING COUNT(*) > 1')
-    console.log('here we go')
-
-    while (dupes.rows.length) {
-        let remaining = dupes.rows.length;
-        console.log(`${remaining} dupes remaining`)
-        console.time('delete')
-        let promises = [];
-        for (let i = 1; i < 16; i++) {
-            promises.push(dupes.rows.splice(remaining - i, 1))
-        }
-        
-        await Promise.all(promises.map(deleteThese))
-        
-        console.timeEnd('delete')
-    }
-
-}
-
-(async () => {
+exports.handler = async () => {
     const timeStart = new Date();
-    console.time('twitter')
+    console.time('twitter');
     
     let response = await getStaleDistrictTwitterAccounts();
     let districts = groupByDistrict(response);
@@ -439,68 +414,78 @@ async function deleteDuplicateTweets() {
     
     const limiter = new Bottleneck({
         maxConcurrent: process.env.MAX_CONCURRENT_FETCHES
-    })
+    });
 
     const throttledFetchTweets = limiter.wrap(fetchTweets);
 
     //Could probably combine into one routine but maybe good to do districts first to perhaps complete in case both cannot get in under API cap
-    let promises = districts.map(throttledFetchTweets)
-    await Promise.all(promises)
-    
-    promises = states.map(fetchTweets);
+    let promises = districts.map(throttledFetchTweets);
     await Promise.all(promises);
     
-    console.timeEnd('twitter')
-    console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`)
-    console.log(`Calls remaining this window: ${window_rate}`)
+    promises = states.map(throttledFetchTweets);
+    await Promise.all(promises);
+    
+    console.timeEnd('twitter');
+    console.log(`Total Tweets Grabbed: ${total_tweets_grabbed}`);
+    console.log(`Calls remaining this window: ${window_rate}`);
     console.time('db push');
 
-    // await saveToDB(districts, states);
-    console.timeEnd('db push')
-
-    let data = await buildJSONByState(states[0].state_id);    
-    console.log(data);
+    await saveToDB(districts, states);
+    console.timeEnd('db push');
+    
     const staleJSON = districts.filter(d=>d.updateJSON);   //rebuild JSON file if new tweets were acquired
     const numDistricts = staleJSON.length;
-    staleJSON.push(...states.filter(s=>s.updateJSON))
+    staleJSON.push(...states.filter(s=>s.updateJSON));
 
     const JSONSUpdated = staleJSON.length;
-    console.log(`${JSONSUpdated} districts/states need new JSON files prepared`)
-    console.time('total json creation')
+    console.log(`${JSONSUpdated} districts/states need new JSON files prepared`);
+    console.time('total json creation');
 
     promises = [];
-    const multibar = new cliProgress.MultiBar({clearOnComplete: false, hideCursor: true}, cliProgress.Presets.shades_grey)
-    queryProgress = multibar.create(JSONSUpdated, 0, {format: 'JSON-Build [{bar}] {percentage}% | {value}/{total} | ETA: {eta}s', stopOnComplete: true});
-    s3UploadsProgress = multibar.create(JSONSUpdated, 0, {format: 'S3-Upload [{bar}] {percentage}% | {value}/{total} | ETA: {eta}s', clearOnComplete: true});
 
     for (let region of staleJSON) {
         let filename, data;
         if (region.district_id) {
-            filename = `${region.state}-${region.district}.json`
-            data = await buildJSONByDistrict(region.district_id)
+            filename = `${region.state}-${region.district}.json`;
+            data = await buildJSONByDistrict(region.district_id);
         } else {
-            filename = `${region.state}.json`
-            data = await buildJSONByState(region.state_id)
+            filename = `${region.state}.json`;
+            data = await buildJSONByState(region.state_id);
         }
-        queryProgress.increment();
-        
-        promises.push(uploadToS3(data, filename))
+
+        promises.push(uploadToS3(data, filename));
 
     }
-    await Promise.all(promises)
-    
-    const timeElapsed = Math.floor((new Date() - timeStart) / 1000)
+    await Promise.all(promises);
+    console.timeEnd('total json creation');
+    const timeElapsed = Math.floor((new Date() - timeStart) / 1000);
 
     const message = `Run complete\n----------------\nTweets Grabbed: ${total_tweets_grabbed}\nJSON Updated: ${JSONSUpdated}\n--States: ${JSONSUpdated - numDistricts}\n--Districts: ${numDistricts}\n----------------\nTime to Run: ${timeElapsed} seconds`;
-    try {
-        await twilioClient.messages.create({
-            body: message,
-            to: process.env.TWILIO_ADMIN_MOBILE,
-            from: process.env.TWILIO_FROM
-        })
-    } catch(e) {
-        console.log(e)
+    if (process.env.SEND_SUMMARY_SMS) {
+        try {
+            await twilioClient.messages.create({
+                body: message,
+                to: process.env.TWILIO_ADMIN_MOBILE,
+                from: process.env.TWILIO_FROM
+            });
+        } catch(e) {
+            console.log(e);
+        }
     }
-    multibar.stop();
-    knex.destroy();
-})();
+    
+    if (process.env.SEND_SMS_ON_ERROR && errorCaught) {
+        try {
+            await twilioClient.messages.create({
+                body: 'Error detected in .',
+                to: process.env.TWILIO_ADMIN_MOBILE,
+                from: process.env.TWILIO_FROM
+            });
+        } catch(e) {
+            console.log(e);
+        }
+    }
+    await knex.destroy();
+    return {
+        result: message
+    };
+};
