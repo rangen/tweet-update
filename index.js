@@ -314,7 +314,7 @@ async function saveToDB(districts, states) {
 }
 
 async function getRateLimit() {
-    let response = await twitter.get('statuses/user_timeline', {screen_name: 'realdonaldtrump', count: 1});
+    let response = await twitter.get('statuses/user_timeline', {screen_name: 'cnnbrk', count: 1});
 
     window_rate = ~~response._headers.get('x-rate-limit-remaining');
     let reset_time = (new Date(response._headers.get('x-rate-limit-reset') * 1000)).toString();

@@ -32,6 +32,7 @@
     "cli-progress": "^3.8.2",
     "dotenv": "^8.2.0",
     "knex": "^0.21.5",
+    "nodemailer": "^6.4.14",
     "pg": "^8.3.3",
     "twilio": "^3.49.1",
     "twitter-lite": "^0.14.0"
